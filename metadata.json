@@ -1,0 +1,6 @@
+{
+  "name": "Apocalypse Toolkit",
+  "description": "Offline-first survival toolkit with 150 tools across 12 categories including offline P2P comms, signaling, navigation, manuals, and utilities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
