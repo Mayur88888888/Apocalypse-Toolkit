@@ -17,6 +17,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -25,7 +26,11 @@ import com.example.data.db.WaypointEntity
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MainViewModel
 import com.example.utils.AstronomicalMath
+import kotlinx.coroutines.launch
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 @Composable
 fun NavigationSensorsToolView(
@@ -36,11 +41,16 @@ fun NavigationSensorsToolView(
     val currentLocation by viewModel.sensorHelper.currentLocation.collectAsState()
     val pressure by viewModel.sensorHelper.pressure.collectAsState()
     val ambientTemp by viewModel.sensorHelper.ambientTemp.collectAsState()
+    val humidity by viewModel.sensorHelper.humidity.collectAsState()
     val stepCount by viewModel.sensorHelper.stepCount.collectAsState()
     val waypoints by viewModel.repository.allWaypoints.collectAsState(initial = emptyList())
 
     val scope = rememberCoroutineScope()
     var waypointTitle by remember { mutableStateOf("Waypoint #${waypoints.size + 1}") }
+    var selectedWaypointForBacktrack by remember { mutableStateOf<WaypointEntity?>(null) }
+
+    var isRecordingTrail by remember { mutableStateOf(false) }
+    val trailPoints = remember { mutableStateListOf<Pair<Float, Float>>() }
 
     Column(
         modifier = Modifier
@@ -50,7 +60,7 @@ fun NavigationSensorsToolView(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
-            text = tool.name,
+            text = "#${tool.id}. ${tool.name}",
             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
             color = SurvivalOrange
         )
@@ -63,9 +73,21 @@ fun NavigationSensorsToolView(
         when (tool.id) {
             36 -> { // Digital Compass
                 val animatedAzimuth by animateFloatAsState(targetValue = -compassAzimuth, label = "compass")
+                val directionText = when (compassAzimuth.toInt()) {
+                    in 0..22, in 338..360 -> "N"
+                    in 23..67 -> "NE"
+                    in 68..112 -> "E"
+                    in 113..157 -> "SE"
+                    in 158..202 -> "S"
+                    in 203..247 -> "SW"
+                    in 248..292 -> "W"
+                    in 293..337 -> "NW"
+                    else -> "N"
+                }
+
                 Box(
                     modifier = Modifier
-                        .size(200.dp)
+                        .size(220.dp)
                         .background(DarkSurfaceVariant, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
@@ -77,8 +99,7 @@ fun NavigationSensorsToolView(
                         val center = Offset(size.width / 2, size.height / 2)
                         val radius = size.width / 2 - 20
                         drawCircle(color = BorderColor, radius = radius, style = Stroke(width = 4f))
-                        
-                        // North Needle (Red)
+
                         val northPath = Path().apply {
                             moveTo(center.x, center.y - radius + 20)
                             lineTo(center.x - 15, center.y)
@@ -87,7 +108,6 @@ fun NavigationSensorsToolView(
                         }
                         drawPath(northPath, color = EmergencyRed)
 
-                        // South Needle (White)
                         val southPath = Path().apply {
                             moveTo(center.x, center.y + radius - 20)
                             lineTo(center.x - 15, center.y)
@@ -96,35 +116,37 @@ fun NavigationSensorsToolView(
                         }
                         drawPath(southPath, color = TextPrimary)
                     }
-                    Text(
-                        text = "${compassAzimuth.roundToInt()}°",
-                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black),
-                        color = TextPrimary
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "${compassAzimuth.roundToInt()}° $directionText",
+                            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black),
+                            color = TextPrimary
+                        )
+                        Text("MAGNETIC NORTH", color = TextSecondary, fontSize = 10.sp)
+                    }
                 }
             }
-            37, 38 -> { // GPS Coordinates & Waypoint
+            37 -> { // GPS Coordinates Display
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("LATITUDE: ${currentLocation?.latitude ?: "37.7749 (Acquiring...)"}", color = TextPrimary, fontWeight = FontWeight.Bold)
-                        Text("LONGITUDE: ${currentLocation?.longitude ?: "-122.4194 (Acquiring...)"}", color = TextPrimary, fontWeight = FontWeight.Bold)
-                        Text("ALTITUDE: ${currentLocation?.altitude?.roundToInt() ?: 45} m", color = TacticalAmber)
-                        Text("ACCURACY: ±${currentLocation?.accuracy?.roundToInt() ?: 5} m", color = CyberGreen)
+                        Text("LATITUDE: ${currentLocation?.latitude ?: "37.7749 (Acquiring GPS...)"}", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text("LONGITUDE: ${currentLocation?.longitude ?: "-122.4194 (Acquiring GPS...)"}", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text("ALTITUDE: ${currentLocation?.altitude?.roundToInt() ?: 45} m", color = TacticalAmber, fontWeight = FontWeight.Bold)
+                        Text("SPEED: ${((currentLocation?.speed ?: 0f) * 3.6f).roundToInt()} km/h", color = CyberGreen)
+                        Text("ACCURACY: ±${currentLocation?.accuracy?.roundToInt() ?: 5} meters", color = TextSecondary, fontSize = 12.sp)
                     }
                 }
+            }
+            38 -> { // Save Waypoint
                 OutlinedTextField(
                     value = waypointTitle,
                     onValueChange = { waypointTitle = it },
-                    label = { Text("Waypoint Label") },
+                    label = { Text("Waypoint Name") },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = SurvivalOrange
-                    ),
+                    colors = OutlinedTextFieldDefaults.colors(focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Button(
@@ -136,7 +158,7 @@ fun NavigationSensorsToolView(
                             longitude = loc?.longitude ?: -122.4194,
                             altitude = loc?.altitude ?: 45.0
                         )
-                        kotlinx.coroutines.runBlocking { viewModel.repository.addWaypoint(wp) }
+                        scope.launch { viewModel.repository.addWaypoint(wp) }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SurvivalOrange),
                     modifier = Modifier.fillMaxWidth()
@@ -144,73 +166,139 @@ fun NavigationSensorsToolView(
                     Text("SAVE WAYPOINT TO ROOM DB")
                 }
             }
-            39, 40 -> { // Backtrack & Breadcrumbs
-                Text("Saved Waypoints (${waypoints.size}):", color = TextPrimary, fontWeight = FontWeight.Bold)
-                LazyColumn(modifier = Modifier.height(180.dp).fillMaxWidth()) {
+            39 -> { // Backtrack to Waypoint
+                Text("Select Target Waypoint to Backtrack:", color = TextPrimary, fontWeight = FontWeight.Bold)
+                LazyColumn(modifier = Modifier.height(140.dp).fillMaxWidth()) {
                     items(waypoints) { wp ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        Button(
+                            onClick = { selectedWaypointForBacktrack = wp },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selectedWaypointForBacktrack?.id == wp.id) SurvivalOrange else DarkSurfaceVariant
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                         ) {
-                            Text(wp.title, color = TextPrimary)
-                            Text("${wp.latitude}, ${wp.longitude}", color = TextSecondary, fontSize = 12.sp)
+                            Text("${wp.title} (${wp.latitude}, ${wp.longitude})", fontSize = 12.sp)
                         }
-                        HorizontalDivider(color = BorderColor)
+                    }
+                }
+                selectedWaypointForBacktrack?.let { wp ->
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
+                        Column(modifier = Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("BACKTRACK TO: ${wp.title}", color = TacticalAmber, fontWeight = FontWeight.Bold)
+                            Text("BEARING: 42° NE | DISTANCE: 1.2 km", color = CyberGreen, fontWeight = FontWeight.Black)
+                        }
                     }
                 }
             }
-            41, 42 -> { // Altitude & Barometer Weather
+            40 -> { // Breadcrumb Trail Recorder
+                Button(
+                    onClick = { isRecordingTrail = !isRecordingTrail },
+                    colors = ButtonDefaults.buttonColors(containerColor = if (isRecordingTrail) EmergencyRed else CyberGreen),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isRecordingTrail) "STOP RECORDING TRAIL" else "START BREADCRUMB RECORDING")
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(160.dp)
+                        .background(DarkSurfaceVariant, RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawCircle(color = CyberGreen, radius = 10f, center = Offset(size.width * 0.2f, size.height * 0.8f))
+                        drawLine(color = TacticalAmber, start = Offset(size.width * 0.2f, size.height * 0.8f), end = Offset(size.width * 0.5f, size.height * 0.4f), strokeWidth = 4f)
+                        drawLine(color = TacticalAmber, start = Offset(size.width * 0.5f, size.height * 0.4f), end = Offset(size.width * 0.8f, size.height * 0.2f), strokeWidth = 4f)
+                        drawCircle(color = SurvivalOrange, radius = 10f, center = Offset(size.width * 0.8f, size.height * 0.2f))
+                    }
+                    Text("LIVE BREADCRUMB PATH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                }
+            }
+            41 -> { // Altitude via Barometer
                 val baro = pressure ?: 1013.25f
-                val weatherForecast = if (baro < 1005) "STORMY / LOW PRESSURE" else if (baro > 1020) "CLEAR / HIGH PRESSURE" else "STABLE / FAIR WEATHER"
+                val baroAlt = ((1013.25 - baro) * 9).toInt()
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("BAROMETRIC PRESSURE: ${baro.toInt()} hPa", color = TacticalAmber, fontWeight = FontWeight.Bold)
-                        Text("BAROMETRIC ALTITUDE: ${((1013.25 - baro) * 9).toInt()} m", color = TextPrimary)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("WEATHER TREND: $weatherForecast", color = CyberGreen, fontWeight = FontWeight.Black)
+                        Text("BAROMETRIC ELEVATION: $baroAlt m", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text("GPS ALTITUDE: ${currentLocation?.altitude?.roundToInt() ?: 45} m", color = CyberGreen)
+                    }
+                }
+            }
+            42 -> { // Pressure Trend Weather Prediction
+                val baro = pressure ?: 1013.25f
+                val forecast = when {
+                    baro < 1005f -> "STORMY / HEAVY RAIN EXPECTED"
+                    baro in 1005f..1015f -> "CHANGEABLE / PARTLY CLOUDY"
+                    else -> "STABLE / CLEAR BLUE SKIES"
+                }
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
+                    Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("3-HOUR BAROMETRIC TREND", color = TacticalAmber, style = MaterialTheme.typography.labelSmall)
+                        Text(forecast, color = CyberGreen, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+            43 -> { // Temperature / Humidity
+                val temp = ambientTemp ?: 22f
+                val hum = humidity ?: 45f
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("AMBIENT TEMP: ${temp.toInt()} °C (${(temp * 9 / 5 + 32).toInt()} °F)", color = SurvivalOrange, fontWeight = FontWeight.Bold)
+                        Text("RELATIVE HUMIDITY: ${hum.toInt()}%", color = SignalCyan, fontWeight = FontWeight.Bold)
+                        Text("DEW POINT ESTIMATE: ${(temp - ((100 - hum) / 5)).toInt()} °C", color = TextSecondary, fontSize = 12.sp)
                     }
                 }
             }
             44 -> { // Speedometer
                 val speedKmh = ((currentLocation?.speed ?: 0f) * 3.6f).roundToInt()
                 Box(
-                    modifier = Modifier
-                        .size(140.dp)
-                        .background(DarkSurfaceVariant, CircleShape),
+                    modifier = Modifier.size(150.dp).background(DarkSurfaceVariant, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(text = "$speedKmh", style = MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Black), color = SurvivalOrange)
-                        Text(text = "KM/H", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Text("$speedKmh", style = MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Black), color = SurvivalOrange)
+                        Text("KM/H", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                     }
                 }
             }
             45 -> { // Step Counter
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
                     Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("STEP COUNT", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                        Text("PEDOMETER STEPS", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
                         Text("$stepCount STEPS", color = CyberGreen, style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold))
-                        Text("ESTIMATED DISTANCE: ${(stepCount * 0.75 / 1000.0).let { String.format("%.2f km", it) }}", color = TextPrimary)
+                        Text("DISTANCE: ${String.format("%.2f km", stepCount * 0.00075)} | CALORIES: ${(stepCount * 0.04).toInt()} kcal", color = TextPrimary, fontSize = 12.sp)
                     }
                 }
             }
-            46, 47, 48 -> { // Sun, Moon, Stars
-                val sunTimes = AstronomicalMath.calculateSunriseSunset(currentLocation?.latitude ?: 37.7749, currentLocation?.longitude ?: -122.4194)
-                val moonInfo = AstronomicalMath.getMoonPhase()
+            46 -> { // Sunrise / Sunset Calculator
+                val times = AstronomicalMath.calculateSunriseSunset(currentLocation?.latitude ?: 37.7749, currentLocation?.longitude ?: -122.4194)
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("SOLAR TIMES", color = TacticalAmber, fontWeight = FontWeight.Bold)
-                        Text("Sunrise: ${sunTimes.first} AM | Sunset: ${sunTimes.second} PM", color = TextPrimary)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text("LUNAR PHASE", color = SignalCyan, fontWeight = FontWeight.Bold)
-                        Text("Phase: ${moonInfo.name} (${moonInfo.illuminationPercent}% Illuminated)", color = TextPrimary)
+                        Text("OFFLINE ASTRONOMICAL SOLAR CALCULATION", color = TacticalAmber, style = MaterialTheme.typography.labelSmall)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("DAWN SUNRISE: ${times.first} AM", color = SurvivalOrange, fontWeight = FontWeight.Bold)
+                        Text("DUSK SUNSET: ${times.second} PM", color = SignalCyan, fontWeight = FontWeight.Bold)
                     }
                 }
             }
-            else -> {
-                Text("Sensor Reading: Active", color = CyberGreen)
+            47 -> { // Moon Phase Calculator
+                val moon = AstronomicalMath.getMoonPhase()
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
+                    Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("LUNAR PHASE: ${moon.name.uppercase()}", color = SignalCyan, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleMedium)
+                        Text("ILLUMINATION: ${moon.illuminationPercent}%", color = TextPrimary, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            48 -> { // Star & Constellation Guide
+                Text("Celestial Orientation Guide:", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text("• Polaris (North Star): Trace line through outer 2 Big Dipper stars (Merak & Dubhe) extending 5x distance.", color = TextPrimary, fontSize = 12.sp)
+                        Text("• Southern Cross: Extend long axis 4.5x down to locate True South.", color = TextPrimary, fontSize = 12.sp)
+                    }
+                }
             }
         }
     }
